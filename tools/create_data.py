@@ -9,7 +9,7 @@ import logging
 from pyquaternion import Quaternion
 # 配置日志级别和输出格式
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
+import pickle
 
 
 class Data():
@@ -54,6 +54,14 @@ class NUSCENES(Data):
         train_nusc_infos,val_nusc_infos=self._fill_trainval_infos(train_scenes,val_scenes,test,max_sweeps=max_sweeps)
 
         logging.info(type(self.nusc.sample))
+        metadata=dict(version=version)
+        if test:
+            data=dict(infos=train_nusc_infos,metadata=metadata)
+            info_path=os.path.join(root_path,'{}_infos_train.pkl'.format(info_prefix)) #info_prefix的目的就是生成的pkl文件的名称
+            pickle.dump(data,info_path)
+            data["infos"]=val_nusc_infos
+            info_val_path=os.path.join(root_path,'{}_infos_val.pkl'.format(info_prefix))
+            pickle.dump(data,info_val_path)
 
 
     def get_available_scenes(self): #检查路径是否合法，lidar的路径，实际上内部原理黑盒
@@ -111,10 +119,10 @@ class NUSCENES(Data):
                                 sd_rec['calibrated_sensor_token'])
             pose_record = self.nusc.get('ego_pose', sd_rec['ego_pose_token'])
             lidar_path, boxes, _ = self.nusc.get_sample_data(lidar_token)
-
-            
-            can_bus = _get_can_bus_info(nusc, nusc_can_bus, sample)
-            ##
+            can_bus=None
+            if self.nusc_can_bus:
+                can_bus = self._get_can_bus_info(self.nusc, self.nusc_can_bus, sample)
+            #
             info = {
                 'lidar_path': lidar_path,
                 'token': sample['token'],
@@ -155,28 +163,28 @@ class NUSCENES(Data):
             ]
             for cam in camera_types:
                 cam_token = sample['data'][cam]
-                cam_path, _, cam_intrinsic = nusc.get_sample_data(cam_token)
-                cam_info = obtain_sensor2top(nusc, cam_token, l2e_t, l2e_r_mat,
+                cam_path, _, cam_intrinsic = self.nusc.get_sample_data(cam_token)
+                cam_info = self.obtain_sensor2top(cam_token, l2e_t, l2e_r_mat,
                                             e2g_t, e2g_r_mat, cam)
                 cam_info.update(cam_intrinsic=cam_intrinsic)
                 info['cams'].update({cam: cam_info})
 
             # obtain sweeps for a single key-frame
-            sd_rec = nusc.get('sample_data', sample['data']['LIDAR_TOP'])
+            sd_rec = self.nusc.get('sample_data', sample['data']['LIDAR_TOP'])
             sweeps = []
             while len(sweeps) < max_sweeps:
                 if not sd_rec['prev'] == '':
-                    sweep = obtain_sensor2top(nusc, sd_rec['prev'], l2e_t,
+                    sweep = self.obtain_sensor2top(sd_rec['prev'], l2e_t,
                                             l2e_r_mat, e2g_t, e2g_r_mat, 'lidar')
                     sweeps.append(sweep)
-                    sd_rec = nusc.get('sample_data', sd_rec['prev'])
+                    sd_rec = self.nusc.get('sample_data', sd_rec['prev'])
                 else:
                     break
             info['sweeps'] = sweeps
             # obtain annotation
             if not test:
                 annotations = [
-                    nusc.get('sample_annotation', token)
+                    self.nusc.get('sample_annotation', token)
                     for token in sample['anns']
                 ]
                 locs = np.array([b.center for b in boxes]).reshape(-1, 3)
@@ -184,7 +192,7 @@ class NUSCENES(Data):
                 rots = np.array([b.orientation.yaw_pitch_roll[0]
                                 for b in boxes]).reshape(-1, 1)
                 velocity = np.array(
-                    [nusc.box_velocity(token)[:2] for token in sample['anns']])
+                    [self.nusc.box_velocity(token)[:2] for token in sample['anns']])
                 valid_flag = np.array(
                     [(anno['num_lidar_pts'] + anno['num_radar_pts']) > 0
                     for anno in annotations],
@@ -197,9 +205,11 @@ class NUSCENES(Data):
                     velocity[i] = velo[:2]
 
                 names = [b.name for b in boxes]
-                for i in range(len(names)):
-                    if names[i] in NuScenesDataset.NameMapping:
-                        names[i] = NuScenesDataset.NameMapping[names[i]]
+# 此处需要结合mmdetection的内容，暂时先进性注释
+                # for i in range(len(names)):
+                #     if names[i] in NuScenesDataset.NameMapping:
+                #         names[i] = NuScenesDataset.NameMapping[names[i]]
+
                 names = np.array(names)
                 # we need to convert rot to SECOND format.
                 gt_boxes = np.concatenate([locs, dims, -rots - np.pi / 2], axis=1)
@@ -222,6 +232,76 @@ class NUSCENES(Data):
         return train_nusc_infos, val_nusc_infos     
 
 
+    def _get_can_bus_info(self,nusc, nusc_can_bus, sample):
+        return None
+
+
+    def obtain_sensor2top(self,
+                      sensor_token,
+                      l2e_t,
+                      l2e_r_mat,
+                      e2g_t,
+                      e2g_r_mat,
+                      sensor_type='lidar'):
+        """Obtain the info with RT matric from general sensor to Top LiDAR.
+
+        Args:
+            nusc (class): Dataset class in the nuScenes dataset.
+            sensor_token (str): Sample data token corresponding to the
+                specific sensor type.
+            l2e_t (np.ndarray): Translation from lidar to ego in shape (1, 3).
+            l2e_r_mat (np.ndarray): Rotation matrix from lidar to ego
+                in shape (3, 3).
+            e2g_t (np.ndarray): Translation from ego to global in shape (1, 3).
+            e2g_r_mat (np.ndarray): Rotation matrix from ego to global
+                in shape (3, 3).
+            sensor_type (str): Sensor to calibrate. Default: 'lidar'.
+
+        Returns:
+            sweep (dict): Sweep information after transformation.
+        """
+        sd_rec = self.nusc.get('sample_data', sensor_token)
+        cs_record = self.nusc.get('calibrated_sensor',
+                            sd_rec['calibrated_sensor_token'])
+        pose_record = self.nusc.get('ego_pose', sd_rec['ego_pose_token'])
+        data_path = str(self.nusc.get_sample_data_path(sd_rec['token']))
+        if os.getcwd() in data_path:  # path from lyftdataset is absolute path
+            data_path = data_path.split(f'{os.getcwd()}/')[-1]  # relative path
+        sweep = {
+            'data_path': data_path,
+            'type': sensor_type,
+            'sample_data_token': sd_rec['token'],
+            'sensor2ego_translation': cs_record['translation'],
+            'sensor2ego_rotation': cs_record['rotation'],
+            'ego2global_translation': pose_record['translation'],
+            'ego2global_rotation': pose_record['rotation'],
+            'timestamp': sd_rec['timestamp']
+        }
+
+        l2e_r_s = sweep['sensor2ego_rotation']
+        l2e_t_s = sweep['sensor2ego_translation']
+        e2g_r_s = sweep['ego2global_rotation']
+        e2g_t_s = sweep['ego2global_translation']
+
+        # obtain the RT from sensor to Top LiDAR
+        # sweep->ego->global->ego'->lidar
+        l2e_r_s_mat = Quaternion(l2e_r_s).rotation_matrix
+        e2g_r_s_mat = Quaternion(e2g_r_s).rotation_matrix
+        R = (l2e_r_s_mat.T @ e2g_r_s_mat.T) @ (
+            np.linalg.inv(e2g_r_mat).T @ np.linalg.inv(l2e_r_mat).T)
+        T = (l2e_t_s @ e2g_r_s_mat.T + e2g_t_s) @ (
+            np.linalg.inv(e2g_r_mat).T @ np.linalg.inv(l2e_r_mat).T)
+        T -= e2g_t @ (np.linalg.inv(e2g_r_mat).T @ np.linalg.inv(l2e_r_mat).T
+                    ) + l2e_t @ np.linalg.inv(l2e_r_mat).T
+        sweep['sensor2lidar_rotation'] = R.T  # points @ R.T + T
+        sweep['sensor2lidar_translation'] = T
+        return sweep
+
+
+
+
+
+
 if __name__=='__main__':
     root_path="./data/nuscenes"
     can_bus_root_path=""
@@ -230,5 +310,5 @@ if __name__=='__main__':
     dataset_name="nuscenes"
     out_dir="./data/nuscenes"
     nu=NUSCENES(root_path,can_bus_root_path,info_prefix,version,dataset_name,out_dir)
-    nu.get_available_scenes()
+    # nu.get_available_scenes()
         
