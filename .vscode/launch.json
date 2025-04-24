@@ -8,10 +8,11 @@
             "name": "Python Debugger: Current File",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/tools/create_data.py", // 确保路径正确指向create_data.py
+            "program": "${workspaceFolder}/tools/train.py", // 确保路径正确指向create_data.py
             "console": "integratedTerminal",
-            "pythonPath": "/home/wsy/anaconda3/envs/open-mmlab/bin/python",
-            "args": [               
+            "python": "/home/wsy/anaconda3/envs/open-mmlab/bin/python",
+            "args": [  
+                "/home/wsy/bev/generalbev/configs/generalbev/generalbev_base.py"             
             ],
             "env": {
                 "PYTHONPATH": "${workspaceFolder}:${env:PYTHONPATH}"
